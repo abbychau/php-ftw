@@ -1,0 +1,90 @@
+name: Build PECL Extension
+on:
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: 'PECL extension to build'
+        required: true
+      version:
+        description: 'PECL extension version to build'
+        required: true
+defaults:
+  run:
+    shell: cmd
+jobs:
+  build:
+    name: ${{github.event.inputs.extension}}-${{github.event.inputs.version}} (${{matrix.version}}, ${{matrix.arch}}, ${{matrix.ts}})
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['8.2', '8.1', '8.0']
+        arch: [x64, x86]
+        ts: [nts, ts]
+    runs-on: windows-2019
+    steps:
+      - name: Checkout php-ftw
+        uses: actions/checkout@v3
+      - name: Fetch package
+        run: curl -OLs https://pecl.php.net/get/${{github.event.inputs.extension}}-${{github.event.inputs.version}}.tgz && 7z x ${{github.event.inputs.extension}}-${{github.event.inputs.version}}.tgz && 7z x ${{github.event.inputs.extension}}-${{github.event.inputs.version}}.tar
+      - name: Compute virtual inputs
+        id: virtuals
+        run: php .github\workflows\pecl.php ${{matrix.version}} ${{matrix.arch}} ${{matrix.ts}} ${{github.event.inputs.extension}}
+      - name: Setup PHP
+        id: setup-php
+        uses: cmb69/setup-php-sdk@v0.7
+        with:
+          version: ${{matrix.version}}
+          arch: ${{matrix.arch}}
+          ts: ${{matrix.ts}}
+          deps: ${{steps.virtuals.outputs.libs}}
+      - name: Enable Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{matrix.arch}}
+          toolset: ${{steps.setup-php.outputs.toolset}}
+          sdk: ${{steps.setup-php.outputs.winsdk}}
+      - name: Build and install dependency extensions
+        run: if exist extensions.csv for /f "tokens=1,2*" %%i in (extensions.csv) do call .github\workflows\install-pecl-dep %%i %%j ${{steps.setup-php.outputs.prefix}}
+      - name: phpize
+        run: |
+          cd ${{github.event.inputs.extension}}-${{github.event.inputs.version}}
+          phpize > phpize-php_${{github.event.inputs.extension}}-${{github.event.inputs.version}}-${{matrix.version}}-${{matrix.ts}}-${{steps.virtuals.outputs.vs}}-${{matrix.arch}}.txt 2>&1
+          set error=%errorlevel%
+          type phpize-php_${{github.event.inputs.extension}}-${{github.event.inputs.version}}-${{matrix.version}}-${{matrix.ts}}-${{steps.virtuals.outputs.vs}}-${{matrix.arch}}.txt
+          exit /b %error%
+      - name: configure
+        run: |
+          cd ${{github.event.inputs.extension}}-${{github.event.inputs.version}}
+          configure --with-php-build=..\..\deps ${{steps.virtuals.outputs.config}} --with-mp=disable --enable-debug-pack > configure-php_${{github.event.inputs.extension}}-${{github.event.inputs.version}}-${{matrix.version}}-${{matrix.ts}}-${{steps.virtuals.outputs.vs}}-${{matrix.arch}}.txt 2>&1
+          set error=%errorlevel%
+          type configure-php_${{github.event.inputs.extension}}-${{github.event.inputs.version}}-${{matrix.version}}-${{matrix.ts}}-${{steps.virtuals.outputs.vs}}-${{matrix.arch}}.txt
+          exit /b %error%
+      - name: make
+        run: |
+          cd ${{github.event.inputs.extension}}-${{github.event.inputs.version}}
+          nmake > make-php_${{github.event.inputs.extension}}-${{github.event.inputs.version}}-${{matrix.version}}-${{matrix.ts}}-${{steps.virtuals.outputs.vs}}-${{matrix.arch}}.txt 2>&1
+          set error=%errorlevel%
+          type make-php_${{github.event.inputs.extension}}-${{github.event.inputs.version}}-${{matrix.version}}-${{matrix.ts}}-${{steps.virtuals.outputs.vs}}-${{matrix.arch}}.txt
+          exit /b %error%
+      - name: Package
+        run: |
+          cd ${{github.event.inputs.extension}}-${{github.event.inputs.version}}
+          md ..\install
+          xcopy COPYING ..\install\*
+          xcopy COPYRIGHT ..\install\*
+          xcopy LICENSE ..\install\*
+          for %%i in (${{steps.virtuals.outputs.docs}}) do echo f | xcopy %%i ..\install\%%i
+          xcopy ${{steps.virtuals.outputs.builddir}}\*.dll ..\install\*
+          for %%i in (..\install\*.dll) do xcopy ${{steps.virtuals.outputs.builddir}}\%%~ni.pdb ..\install\*
+          cd ..\install
+          if exist vc140.pdb del vc140.pdb
+          7z a -sdel php_${{github.event.inputs.extension}}-${{github.event.inputs.version}}-${{matrix.version}}-${{matrix.ts}}-${{steps.virtuals.outputs.vs}}-${{matrix.arch}}.zip *
+          cd ..\${{github.event.inputs.extension}}-${{github.event.inputs.version}}
+          xcopy *-php_${{github.event.inputs.extension}}-${{github.event.inputs.version}}-${{matrix.version}}-${{matrix.ts}}-${{steps.virtuals.outputs.vs}}-${{matrix.arch}}.txt ..\install\logs\*
+          cd ..\install\logs
+          7z a -sdel php_${{github.event.inputs.extension}}-${{github.event.inputs.version}}-${{matrix.version}}-${{matrix.ts}}-${{steps.virtuals.outputs.vs}}-${{matrix.arch}}.zip *
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: artifacts
+          path: install
